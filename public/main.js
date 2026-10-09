@@ -96,6 +96,8 @@ function setupThree() {
     0.1,
     20,
   );
+  // Default framing (spec values); refined per-avatar by frameAvatar() once the
+  // VRM is loaded and its real bounding box is known.
   camera.position.set(0, 1.0, 4.0);
   camera.lookAt(0, 0.75, 0);
 
@@ -134,6 +136,10 @@ async function loadAvatar(avatarUrl) {
   currentVrm = vrm;
   scene.add(vrm.scene);
 
+  // Frame the camera to this avatar's actual size (heights vary per VRM, so a
+  // fixed look-at point leaves some models off-center/too high).
+  frameAvatar(vrm);
+
   // Single AnimationMixer on vrm.scene, used for every clip.
   mixer = new THREE.AnimationMixer(vrm.scene);
 
@@ -145,6 +151,69 @@ async function loadAvatar(avatarUrl) {
 
   // Prime the blink timer.
   nextBlinkAt = clock.getElapsedTime() + randomBlinkDelay();
+}
+
+// Center the camera on the avatar's full body, whatever the model's height.
+// VRM bounding boxes are unreliable (bind-pose / culling bounds), so frame off
+// the humanoid bones: head gives the top, feet give the bottom.
+function frameAvatar(vrm) {
+  vrm.scene.updateWorldMatrix(true, true);
+
+  const humanoid = vrm.humanoid;
+  const tmp = new THREE.Vector3();
+
+  const getBoneY = (name) => {
+    const node = humanoid?.getNormalizedBoneNode(name);
+    if (!node) return null;
+    node.getWorldPosition(tmp);
+    return tmp.y;
+  };
+  const getBoneX = (name) => {
+    const node = humanoid?.getNormalizedBoneNode(name);
+    if (!node) return null;
+    node.getWorldPosition(tmp);
+    return tmp.x;
+  };
+
+  // Top of head and the lower of the two feet, with small padding for scalp
+  // above the head bone and the sole below the foot bone.
+  const headY = getBoneY("head");
+  const leftFootY = getBoneY("leftFoot");
+  const rightFootY = getBoneY("rightFoot");
+  const hipsX = getBoneX("hips");
+
+  let topY, bottomY, centerX;
+  if (headY != null && (leftFootY != null || rightFootY != null)) {
+    const feetY = Math.min(
+      leftFootY != null ? leftFootY : Infinity,
+      rightFootY != null ? rightFootY : Infinity,
+    );
+    topY = headY + 0.15; // scalp above the head bone
+    bottomY = feetY - 0.05; // sole below the foot bone
+    centerX = hipsX != null ? hipsX : 0;
+  } else {
+    // Fallback to bounding box if the humanoid bones aren't available.
+    const box = new THREE.Box3().setFromObject(vrm.scene);
+    if (box.isEmpty()) return;
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    box.getSize(size);
+    box.getCenter(center);
+    topY = center.y + size.y / 2;
+    bottomY = center.y - size.y / 2;
+    centerX = center.x;
+  }
+
+  const height = topY - bottomY;
+  const centerY = (topY + bottomY) / 2;
+
+  // Distance to fit the full height in the vertical FOV, plus a small margin.
+  const fov = THREE.MathUtils.degToRad(camera.fov);
+  const distance = (height / 2 / Math.tan(fov / 2)) * 1.15;
+
+  camera.position.set(centerX, centerY, distance);
+  camera.lookAt(centerX, centerY, 0);
+  camera.updateProjectionMatrix();
 }
 
 async function preloadClips(vrm) {
@@ -193,25 +262,36 @@ function playIntro() {
   const fallFlat = getAction("fall-flat");
   const standUp = getAction("stand-up");
 
-  fallFlat
-    .reset()
-    .setLoop(THREE.LoopOnce, 1);
+  fallFlat.reset().setLoop(THREE.LoopOnce, 1);
   fallFlat.clampWhenFinished = true;
 
   standUp.setLoop(THREE.LoopOnce, 1);
   standUp.clampWhenFinished = true;
   standUp.timeScale = STANDUP_TIME_SCALE;
 
-  // Chain the one-shots on the mixer 'finished' event.
   const onFinished = (e) => {
     if (e.action === fallFlat) {
-      standUp.reset().play();
-      // Skip the ~2.5s of lying still at the start.
+      // Crossfade from the clamped fall-flat into stand-up (skip the ~2.5s of
+      // lying still at the start).
+      standUp.reset();
       standUp.time = STANDUP_START;
+      standUp.setEffectiveWeight(1);
+      standUp.play();
+      fallFlat.crossFadeTo(standUp, CROSSFADE_DURATION, false);
     } else if (e.action === standUp) {
-      // Crossfade into the looping idle.
-      idleAction.reset().setLoop(THREE.LoopRepeat, Infinity).play();
-      standUp.crossFadeTo(idleAction, CROSSFADE_DURATION, false);
+      // Hand off to the looping idle. Fade idle IN to full weight and fade the
+      // clamped stand-up OUT, rather than crossFadeTo (which from a clamped
+      // LoopOnce action leaves the body stuck in a bad blend).
+      idleAction.reset().setLoop(THREE.LoopRepeat, Infinity);
+      idleAction.setEffectiveWeight(1);
+      idleAction.fadeIn(CROSSFADE_DURATION).play();
+      standUp.fadeOut(CROSSFADE_DURATION);
+      // Once the fade is done, stop the intro actions entirely so only idle
+      // drives the rig (a clamped LoopOnce action can otherwise keep tugging).
+      setTimeout(() => {
+        standUp.stop();
+        fallFlat.stop();
+      }, CROSSFADE_DURATION * 1000 + 50);
       mixer.removeEventListener("finished", onFinished);
     }
   };
