@@ -178,9 +178,11 @@ async function loadAvatar(avatarUrl) {
 
   await preloadClips(vrm);
 
-  // Start idle immediately (visible under the overlay).
+  // Prepare the idle action but DO NOT play it yet — the character stays
+  // hidden until "Click to start", then falls in from above. Showing idle
+  // under the overlay would reveal him standing before the fall.
   idleAction = getAction("idle");
-  idleAction.reset().setLoop(THREE.LoopRepeat, Infinity).play();
+  vrm.scene.visible = false;
 
   // Prime the blink timer.
   nextBlinkAt = clock.getElapsedTime() + randomBlinkDelay();
@@ -289,37 +291,30 @@ function playIntro() {
   if (introPlayed) return;
   introPlayed = true;
 
-  // Stop the idle that was running under the overlay; the intro drives it.
-  idleAction.stop();
+  // Reveal the character now (he was hidden under the overlay so we never see
+  // him standing). He falls in from above, lands, then stands up.
+  if (currentVrm) currentVrm.scene.visible = true;
 
   const fallFlat = getAction("fall-flat");
   const standUp = getAction("stand-up");
 
-  // Start already fallen: pin fall-flat to its LAST frame (lying on the
-  // ground) instead of playing the fall. We hold that pose briefly, then
-  // stand up — so clicking start shows him down, not standing-then-falling.
-  const fallClip = clips["fall-flat"];
+  // Play the full fall from the beginning: drop from above and land.
   fallFlat.reset().setLoop(THREE.LoopOnce, 1);
   fallFlat.clampWhenFinished = true;
-  fallFlat.paused = true;
-  fallFlat.time = Math.max(0, fallClip.duration - 0.001); // last frame
-  fallFlat.play();
 
   standUp.setLoop(THREE.LoopOnce, 1);
   standUp.clampWhenFinished = true;
   standUp.timeScale = STANDUP_TIME_SCALE;
 
-  // Hold the fallen pose for a beat, then stand up.
-  setTimeout(() => {
-    standUp.reset();
-    standUp.time = STANDUP_START; // skip the ~2.5s lying still at the start
-    standUp.setEffectiveWeight(1);
-    standUp.play();
-    fallFlat.crossFadeTo(standUp, CROSSFADE_DURATION, false);
-  }, 600);
-
   const onFinished = (e) => {
-    if (e.action === standUp) {
+    if (e.action === fallFlat) {
+      // Landed — now stand up (skip the ~2.5s lying still at the start).
+      standUp.reset();
+      standUp.time = STANDUP_START;
+      standUp.setEffectiveWeight(1);
+      standUp.play();
+      fallFlat.crossFadeTo(standUp, CROSSFADE_DURATION, false);
+    } else if (e.action === standUp) {
       // Hand off to the looping idle. Fade idle IN to full weight and fade the
       // clamped stand-up OUT, rather than crossFadeTo (which from a clamped
       // LoopOnce action leaves the body stuck in a bad blend).
@@ -340,6 +335,9 @@ function playIntro() {
   };
 
   mixer.addEventListener("finished", onFinished);
+
+  // Kick off the fall from the top.
+  fallFlat.play();
 }
 
 // --- Blink ------------------------------------------------------------------
