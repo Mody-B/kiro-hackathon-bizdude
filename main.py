@@ -6,6 +6,7 @@ present but runs fine without it. AWS keys are never read or printed here.
 """
 
 import asyncio
+import base64
 import json
 import uuid
 from pathlib import Path
@@ -132,6 +133,83 @@ def run_turn(thread_id: str, user_text: str) -> dict:
     }
 
 
+# --- Voice (Amazon Polly) ---------------------------------------------------
+
+_polly = None
+
+
+def _get_polly():
+    global _polly
+    if _polly is None:
+        import boto3
+
+        _polly = boto3.client("polly", region_name=AWS_REGION)
+    return _polly
+
+
+def synthesize_speech(text: str) -> dict:
+    """Blocking: call Polly twice in parallel — mp3 audio + viseme/word marks.
+    Returns {audio: base64 mp3, visemes: [{time, value}, ...]}."""
+    import concurrent.futures
+
+    char = load_character()
+    voice = char.get("voice", {})
+    voice_id = voice.get("id", "Matthew")
+    engine = voice.get("engine", "neural")
+    polly = _get_polly()
+
+    def _audio():
+        resp = polly.synthesize_speech(
+            Text=text, OutputFormat="mp3", VoiceId=voice_id, Engine=engine
+        )
+        return resp["AudioStream"].read()
+
+    def _marks():
+        resp = polly.synthesize_speech(
+            Text=text,
+            OutputFormat="json",
+            VoiceId=voice_id,
+            Engine=engine,
+            SpeechMarkTypes=["viseme", "word"],
+        )
+        raw = resp["AudioStream"].read().decode("utf-8")
+        visemes = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                mark = json.loads(line)
+            except Exception:
+                continue
+            if mark.get("type") == "viseme":
+                visemes.append({"time": mark["time"], "value": mark["value"]})
+        return visemes
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        f_audio = ex.submit(_audio)
+        f_marks = ex.submit(_marks)
+        audio_bytes = f_audio.result()
+        visemes = f_marks.result()
+
+    return {
+        "audio": base64.b64encode(audio_bytes).decode("ascii"),
+        "visemes": visemes,
+    }
+
+
+def run_turn_with_voice(thread_id: str, user_text: str) -> dict:
+    """Agent reply + Polly voice. Returns {text, emotion, audio, visemes}.
+    Voice failures degrade gracefully to text-only."""
+    reply = run_turn(thread_id, user_text)
+    try:
+        speech = synthesize_speech(reply["text"])
+        reply.update(speech)
+    except Exception as e:  # noqa: BLE001
+        print(f"[polly] synthesis failed, text-only: {type(e).__name__}: {e}")
+    return reply
+
+
 @app.websocket("/ws")
 async def ws(websocket: WebSocket) -> None:
     """One WebSocket per page. Each gets its own conversation memory via a
@@ -151,8 +229,10 @@ async def ws(websocket: WebSocket) -> None:
             if not text:
                 continue
             try:
-                # Run the blocking Bedrock/graph call off the event loop.
-                reply = await asyncio.to_thread(run_turn, thread_id, text)
+                # Run the blocking Bedrock + Polly calls off the event loop.
+                reply = await asyncio.to_thread(
+                    run_turn_with_voice, thread_id, text
+                )
                 await websocket.send_text(
                     json.dumps({"type": "reply", **reply})
                 )
@@ -169,6 +249,85 @@ async def ws(websocket: WebSocket) -> None:
                 )
     except WebSocketDisconnect:
         pass
+
+
+@app.websocket("/transcribe")
+async def transcribe_ws(websocket: WebSocket) -> None:
+    """Bonus A: stream 16kHz PCM mic audio from the browser to Amazon
+    Transcribe and send partial/final transcripts back as JSON.
+
+    Protocol:
+      client -> server: binary frames of 16-bit PCM @ 16kHz; a text frame
+                        '{"type":"stop"}' ends the utterance.
+      server -> client: {"type":"partial"|"final","text":"..."}
+    """
+    await websocket.accept()
+
+    try:
+        from amazon_transcribe.client import TranscribeStreamingClient
+        from amazon_transcribe.handlers import TranscriptResultStreamHandler
+        from amazon_transcribe.model import TranscriptEvent
+    except Exception as e:  # noqa: BLE001
+        print(f"[transcribe] library unavailable: {e}")
+        await websocket.send_text(
+            json.dumps({"type": "error", "message": "Mic not available."})
+        )
+        await websocket.close()
+        return
+
+    client = TranscribeStreamingClient(region=AWS_REGION)
+    stream = await client.start_stream_transcription(
+        language_code="en-US",
+        media_sample_rate_hz=16000,
+        media_encoding="pcm",
+    )
+
+    class Handler(TranscriptResultStreamHandler):
+        async def handle_transcript_event(self, event: TranscriptEvent):
+            for result in event.transcript.results:
+                if not result.alternatives:
+                    continue
+                text = result.alternatives[0].transcript
+                kind = "partial" if result.is_partial else "final"
+                try:
+                    await websocket.send_text(
+                        json.dumps({"type": kind, "text": text})
+                    )
+                except Exception:
+                    pass
+
+    handler = Handler(stream.output_stream)
+
+    async def pump_audio():
+        try:
+            while True:
+                message = await websocket.receive()
+                if "bytes" in message and message["bytes"] is not None:
+                    await stream.input_stream.send_audio_event(
+                        audio_chunk=message["bytes"]
+                    )
+                elif "text" in message and message["text"] is not None:
+                    try:
+                        ctrl = json.loads(message["text"])
+                    except Exception:
+                        continue
+                    if ctrl.get("type") == "stop":
+                        break
+        except WebSocketDisconnect:
+            pass
+        finally:
+            # Close the input so Transcribe finalizes (avoids the 15s timeout).
+            await stream.input_stream.end_stream()
+
+    try:
+        await asyncio.gather(pump_audio(), handler.handle_events())
+    except Exception as e:  # noqa: BLE001
+        print(f"[transcribe] error: {type(e).__name__}: {e}")
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @app.get("/character.json")

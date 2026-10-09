@@ -158,3 +158,74 @@ body {
   background: rgba(120, 120, 140, 0.7);
   cursor: default;
 }
+
+/* --- Speech bubble (M3) --------------------------------------------------- */
+
+#bubble {
+  position: fixed;
+  top: 10%;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(560px, 88vw);
+  padding: 14px 20px;
+  background: rgba(255, 255, 255, 0.95);
+  color: #15202b;
+  border-radius: 18px;
+  font-size: 1.1rem;
+  line-height: 1.4;
+  text-align: center;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+  z-index: 15;
+  transition: opacity 0.25s ease;
+}
+
+#bubble::after {
+  content: "";
+  position: absolute;
+  bottom: -12px;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 12px solid transparent;
+  border-top-color: rgba(255, 255, 255, 0.95);
+  border-bottom: 0;
+}
+
+#bubble.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* --- Controls (Dance + Mic) ----------------------------------------------- */
+
+#controls {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  gap: 10px;
+  z-index: 20;
+}
+
+#controls button {
+  padding: 10px 16px;
+  border: none;
+  border-radius: 12px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(80, 120, 220, 0.95);
+  cursor: pointer;
+  user-select: none;
+}
+
+#dance-btn.active {
+  background: rgba(220, 90, 160, 0.95);
+}
+
+#mic-btn.recording {
+  background: rgba(220, 60, 60, 0.95);
+}
+
+#mic-btn.hidden {
+  display: none;
+}

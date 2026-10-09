@@ -38,15 +38,48 @@ const clips = {};
 const actions = {};
 
 let idleAction = null;
+let currentAction = null; // the main body action currently playing
 let introPlayed = false;
+let introDone = false;
 
-// Shared AudioContext, unlocked on first click (no sound in M1).
+// Shared AudioContext, unlocked on first click.
 let audioContext = null;
 
 // Blink timing.
 let nextBlinkAt = 0;
 let blinkStart = -1;
 const BLINK_DURATION = 0.12; // seconds, ramp up and back down
+
+// Emotion + lip-sync state (M3/M4).
+const EMOTIONS = ["happy", "angry", "sad", "relaxed"]; // neutral = none
+let currentEmotion = "neutral";
+const MOUTH_SHAPES = ["aa", "ih", "ou", "ee", "oh"];
+let activeVisemes = null; // sorted [{time(ms), value}]
+let visemeStartTime = 0; // audioContext time when speech started
+let speaking = false;
+
+// Polly viseme letter -> VRM mouth expression weights.
+const VISEME_MAP = {
+  a: { aa: 1.0 },
+  "@": { aa: 0.5 },
+  e: { ee: 0.8 },
+  E: { ee: 0.6, aa: 0.3 },
+  i: { ih: 0.8 },
+  o: { oh: 0.9 },
+  O: { oh: 0.7, aa: 0.3 },
+  u: { ou: 0.9 },
+  t: { ih: 0.3 },
+  s: { ih: 0.3 },
+  T: { ih: 0.3 },
+  S: { ou: 0.3, ih: 0.2 },
+  k: { aa: 0.3 },
+  r: { ou: 0.3 },
+  f: { ih: 0.2 },
+};
+
+// Dance music.
+let danceAudio = null;
+let dancing = false;
 
 // --- Boot -------------------------------------------------------------------
 
@@ -292,6 +325,8 @@ function playIntro() {
         standUp.stop();
         fallFlat.stop();
       }, CROSSFADE_DURATION * 1000 + 50);
+      currentAction = idleAction;
+      introDone = true;
       mixer.removeEventListener("finished", onFinished);
     }
   };
@@ -340,9 +375,225 @@ function animate() {
   const elapsed = clock.getElapsedTime();
 
   updateBlink(elapsed);
+  updateEmotion();
+  updateLipSync();
 
   if (mixer) mixer.update(delta);
   if (currentVrm) currentVrm.update(delta);
 
   renderer.render(scene, camera);
 }
+
+// --- Emotion ----------------------------------------------------------------
+
+function updateEmotion() {
+  const em = currentVrm?.expressionManager;
+  if (!em) return;
+  // Hold the current emotion at ~0.7 while active; others at 0.
+  const target = currentEmotion === "neutral" ? null : currentEmotion;
+  for (const e of EMOTIONS) {
+    em.setValue(e, e === target ? 0.7 : 0);
+  }
+}
+
+function setEmotion(emotion) {
+  currentEmotion = EMOTIONS.includes(emotion) ? emotion : "neutral";
+}
+
+// --- Lip sync ---------------------------------------------------------------
+
+function clearMouth() {
+  const em = currentVrm?.expressionManager;
+  if (!em) return;
+  for (const m of MOUTH_SHAPES) em.setValue(m, 0);
+}
+
+function updateLipSync() {
+  const em = currentVrm?.expressionManager;
+  if (!em) return;
+
+  if (!speaking || !activeVisemes || !audioContext) {
+    return;
+  }
+
+  const latency = audioContext.outputLatency || 0;
+  const now = (audioContext.currentTime - visemeStartTime - latency) * 1000;
+
+  // Find the last viseme with time <= now.
+  let current = null;
+  for (let i = 0; i < activeVisemes.length; i++) {
+    if (activeVisemes[i].time <= now) current = activeVisemes[i];
+    else break;
+  }
+
+  for (const m of MOUTH_SHAPES) em.setValue(m, 0);
+  if (current) {
+    const shape = VISEME_MAP[current.value];
+    if (shape) {
+      for (const [m, w] of Object.entries(shape)) em.setValue(m, w);
+    }
+  }
+}
+
+// --- Animation switching ----------------------------------------------------
+
+function playAnimation(name, { loop = true } = {}) {
+  if (!mixer || !clips[name]) return;
+  const next = getAction(name);
+  if (next === currentAction && loop) return;
+
+  next.reset();
+  next.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+  next.clampWhenFinished = !loop;
+  next.setEffectiveWeight(1);
+  next.enabled = true;
+
+  if (currentAction && currentAction !== next) {
+    currentAction.crossFadeTo(next, CROSSFADE_DURATION, false);
+  }
+  next.play();
+  currentAction = next;
+}
+
+function returnToIdle() {
+  playAnimation("idle", { loop: true });
+}
+
+// --- Speaking (voice + lip sync + talking animation) ------------------------
+
+function speak(base64Mp3, visemes, onEnd) {
+  stopSpeaking(); // interrupt anything already playing
+
+  if (!audioContext) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) audioContext = new Ctx();
+  }
+  if (audioContext && audioContext.state === "suspended") audioContext.resume();
+
+  playAnimation("talking", { loop: true });
+
+  const bytes = Uint8Array.from(atob(base64Mp3), (c) => c.charCodeAt(0));
+  audioContext.decodeAudioData(
+    bytes.buffer,
+    (buffer) => {
+      const src = audioContext.createBufferSource();
+      src.buffer = buffer;
+      src.connect(audioContext.destination);
+      currentSource = src;
+
+      activeVisemes = (visemes || [])
+        .slice()
+        .sort((a, b) => a.time - b.time);
+      visemeStartTime = audioContext.currentTime;
+      speaking = true;
+
+      src.onended = () => {
+        if (currentSource === src) {
+          finishSpeaking();
+          if (onEnd) onEnd();
+        }
+      };
+      src.start();
+    },
+    (err) => {
+      console.error("decodeAudioData failed", err);
+      finishSpeaking();
+      if (onEnd) onEnd();
+    },
+  );
+}
+
+let currentSource = null;
+
+function finishSpeaking() {
+  speaking = false;
+  activeVisemes = null;
+  currentSource = null;
+  clearMouth();
+  if (!dancing) returnToIdle();
+}
+
+function stopSpeaking() {
+  // Barge-in / interrupt: cut audio and mouth, drop talking animation.
+  if (currentSource) {
+    try {
+      currentSource.onended = null;
+      currentSource.stop();
+    } catch {}
+    currentSource = null;
+  }
+  speaking = false;
+  activeVisemes = null;
+  clearMouth();
+}
+
+// --- Dance ------------------------------------------------------------------
+
+function startDance() {
+  if (dancing) return;
+  stopSpeaking();
+  dancing = true;
+  playAnimation("dance", { loop: true });
+
+  if (!danceAudio) {
+    danceAudio = new Audio("/music/dance.mp3");
+    danceAudio.loop = true;
+  }
+  danceAudio.currentTime = 0;
+  danceAudio.play().catch(() => {});
+}
+
+function stopDance() {
+  if (!dancing) return;
+  dancing = false;
+  if (danceAudio) {
+    danceAudio.pause();
+    danceAudio.currentTime = 0;
+  }
+  returnToIdle();
+}
+
+function toggleDance() {
+  if (dancing) stopDance();
+  else startDance();
+}
+
+// --- Public control API (used by chat.js) -----------------------------------
+
+window.VRMControls = {
+  isReady: () => introDone,
+  setEmotion,
+  // Called when the user starts composing / sends: show thinking + stop talk.
+  thinking: () => {
+    stopSpeaking();
+    if (!dancing) playAnimation("thinking", { loop: true });
+  },
+  // Speak an answer: emotion on face, talking animation, lip sync.
+  speak: (emotion, audio, visemes, onEnd) => {
+    if (dancing) stopDance();
+    setEmotion(emotion || "neutral");
+    if (audio) {
+      speak(audio, visemes, () => {
+        setEmotion("neutral");
+        if (onEnd) onEnd();
+      });
+    } else {
+      // No audio (text-only fallback): brief talking, then idle.
+      playAnimation("talking", { loop: true });
+      setTimeout(() => {
+        setEmotion("neutral");
+        returnToIdle();
+        if (onEnd) onEnd();
+      }, 1500);
+    }
+  },
+  interrupt: () => {
+    stopSpeaking();
+    setEmotion("neutral");
+    if (!dancing) returnToIdle();
+  },
+  toggleDance,
+  startDance,
+  stopDance,
+  isDancing: () => dancing,
+};
