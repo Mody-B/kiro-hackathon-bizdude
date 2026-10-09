@@ -295,23 +295,31 @@ function playIntro() {
   const fallFlat = getAction("fall-flat");
   const standUp = getAction("stand-up");
 
+  // Start already fallen: pin fall-flat to its LAST frame (lying on the
+  // ground) instead of playing the fall. We hold that pose briefly, then
+  // stand up — so clicking start shows him down, not standing-then-falling.
+  const fallClip = clips["fall-flat"];
   fallFlat.reset().setLoop(THREE.LoopOnce, 1);
   fallFlat.clampWhenFinished = true;
+  fallFlat.paused = true;
+  fallFlat.time = Math.max(0, fallClip.duration - 0.001); // last frame
+  fallFlat.play();
 
   standUp.setLoop(THREE.LoopOnce, 1);
   standUp.clampWhenFinished = true;
   standUp.timeScale = STANDUP_TIME_SCALE;
 
+  // Hold the fallen pose for a beat, then stand up.
+  setTimeout(() => {
+    standUp.reset();
+    standUp.time = STANDUP_START; // skip the ~2.5s lying still at the start
+    standUp.setEffectiveWeight(1);
+    standUp.play();
+    fallFlat.crossFadeTo(standUp, CROSSFADE_DURATION, false);
+  }, 600);
+
   const onFinished = (e) => {
-    if (e.action === fallFlat) {
-      // Crossfade from the clamped fall-flat into stand-up (skip the ~2.5s of
-      // lying still at the start).
-      standUp.reset();
-      standUp.time = STANDUP_START;
-      standUp.setEffectiveWeight(1);
-      standUp.play();
-      fallFlat.crossFadeTo(standUp, CROSSFADE_DURATION, false);
-    } else if (e.action === standUp) {
+    if (e.action === standUp) {
       // Hand off to the looping idle. Fade idle IN to full weight and fade the
       // clamped stand-up OUT, rather than crossFadeTo (which from a clamped
       // LoopOnce action leaves the body stuck in a bad blend).
@@ -332,8 +340,6 @@ function playIntro() {
   };
 
   mixer.addEventListener("finished", onFinished);
-
-  fallFlat.play();
 }
 
 // --- Blink ------------------------------------------------------------------
