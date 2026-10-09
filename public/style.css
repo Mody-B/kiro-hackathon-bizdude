@@ -63,3 +63,98 @@ body {
   font-weight: 600;
   letter-spacing: 0.02em;
 }
+
+/* --- Chat UI (Milestone 2) ------------------------------------------------ */
+
+#chat {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: min(640px, 94vw);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  z-index: 20;
+  pointer-events: none; /* children re-enable; lets 3D show through gaps */
+}
+
+#messages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 40vh;
+  overflow-y: auto;
+  pointer-events: auto;
+}
+
+.msg {
+  max-width: 85%;
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 0.95rem;
+  line-height: 1.35;
+  color: #fff;
+  backdrop-filter: blur(6px);
+  word-wrap: break-word;
+}
+
+.msg.user {
+  align-self: flex-end;
+  background: rgba(80, 120, 220, 0.6);
+  border-bottom-right-radius: 4px;
+}
+
+.msg.bot {
+  align-self: flex-start;
+  background: rgba(20, 20, 30, 0.55);
+  border-bottom-left-radius: 4px;
+}
+
+.msg.error {
+  align-self: flex-start;
+  background: rgba(200, 60, 60, 0.6);
+}
+
+.msg.pending {
+  opacity: 0.7;
+  font-style: italic;
+}
+
+#chat-form {
+  display: flex;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+#chat-input {
+  flex: 1;
+  padding: 12px 14px;
+  border: none;
+  border-radius: 12px;
+  font-size: 1rem;
+  background: rgba(255, 255, 255, 0.92);
+  color: #111;
+  outline: none;
+}
+
+#chat-input:disabled {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+#chat-send {
+  padding: 12px 20px;
+  border: none;
+  border-radius: 12px;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(80, 120, 220, 0.95);
+  cursor: pointer;
+}
+
+#chat-send:disabled {
+  background: rgba(120, 120, 140, 0.7);
+  cursor: default;
+}

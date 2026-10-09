@@ -24,6 +24,22 @@
       </div>
     </div>
 
+    <!-- Chat (Milestone 2) -->
+    <div id="chat">
+      <div id="messages"></div>
+      <form id="chat-form" autocomplete="off">
+        <input
+          id="chat-input"
+          type="text"
+          maxlength="500"
+          placeholder="Say something..."
+          disabled
+        />
+        <button id="chat-send" type="submit" disabled>Send</button>
+      </form>
+    </div>
+
     <script type="module" src="main.js"></script>
+    <script type="module" src="chat.js"></script>
   </body>
 </html>
