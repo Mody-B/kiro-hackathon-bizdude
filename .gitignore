@@ -7,3 +7,6 @@ __pycache__/
 
 # Windows download markers
 *:Zone.Identifier
+
+# Workflow scratch (plans/reviews) — not part of the app
+.agents/
